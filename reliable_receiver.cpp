@@ -38,6 +38,18 @@ int recv_rv;
 struct sockaddr_storage recv_their_addr;	socklen_t recv_addr_len;
 char recv_s[INET6_ADDRSTRLEN];
 char myport[100];
+char sender_ip[INET6_ADDRSTRLEN];
+
+
+// get sockaddr, IPv4 or IPv6:
+void *get_in_addr(struct sockaddr *sa)
+{
+	if (sa->sa_family == AF_INET) {
+		return &(((struct sockaddr_in*)sa)->sin_addr);
+	}
+
+	return &(((struct sockaddr_in6*)sa)->sin6_addr);
+}
 
 int bind_udp(unsigned short int port){
 	sprintf(myport, "%d", port);
@@ -82,17 +94,70 @@ int bind_udp(unsigned short int port){
 }
 
 int recv_message(message* msg){
-	return recvfrom(recv_sockfd, msg, sizeof(*msg), 0, (struct sockaddr *)&recv_their_addr, &recv_addr_len);
+	int ret = recvfrom(recv_sockfd, msg, sizeof(*msg), 0, (struct sockaddr *)&recv_their_addr, &recv_addr_len);
+	inet_ntop(recv_their_addr.ss_family, get_in_addr((struct sockaddr *)&recv_their_addr), sender_ip, sizeof sender_ip);
+	return ret;
+}
+
+int send_ack(char* hostname, unsigned short int hostUDPport, ack msg){
+	int sockfd;
+	struct addrinfo hints, *servinfo, *p;
+	int rv;
+	int numbytes;
+    char theirport[100];
+	sprintf(theirport, "%d", hostUDPport);
+	memset(&hints, 0, sizeof hints);
+	hints.ai_family = AF_UNSPEC;
+	hints.ai_socktype = SOCK_DGRAM;
+    
+	if ((rv = getaddrinfo(hostname, theirport, &hints, &servinfo)) != 0) {
+		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
+		return 1;
+	}
+    
+	// loop through all the results and make a socket
+	for(p = servinfo; p != NULL; p = p->ai_next) {
+		if ((sockfd = socket(p->ai_family, p->ai_socktype,
+                             p->ai_protocol)) == -1) {
+			perror("talker: socket");
+			continue;
+		}
+        
+		break;
+	}
+    
+	if (p == NULL) {
+		fprintf(stderr, "talker: failed to bind socket\n");
+		return 2;
+	}
+    
+
+	if((numbytes = sendto(sockfd, &msg, sizeof(msg), 0, p->ai_addr, p->ai_addrlen)) == -1){
+		perror("talker: sendto");
+		exit(1);
+	}
+
+	freeaddrinfo(servinfo);
+
+	close(sockfd);
+    return numbytes;
 }
 
 void reliablyReceive(unsigned short int myUDPport, char* destinationFile){
-  FILE * pFile;
-  pFile = fopen (destinationFile, "wb");
+
+	
+	FILE * pFile;
+	pFile = fopen (destinationFile, "wb");
   
 
 	while(1){
 		message msg;
 		recv_message(&msg);
+		
+		ack back_ack;
+		back_ack.request_sequence_number = msg.Sequence_number;
+		send_ack(sender_ip, myUDPport-1, back_ack);
+		
 		fwrite (msg.messages , sizeof(char), sizeof(msg.messages), pFile);
 		if(msg.final == 1){
 			break;
