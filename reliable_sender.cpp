@@ -24,6 +24,7 @@
 
 char file_to_send[MAX_BUFFER][BUFFER_SIZE];
 int Sequence_number;
+int my_request_sequence_number;
 
 int recv_sockfd;
 struct addrinfo recv_hints, *recv_servinfo, *recv_p;
@@ -204,6 +205,11 @@ void* accept_ack(void *identifier){
         {
             //mark this packet to be delivered
             recv_ack[Sequence_number] = true;
+            //update my local requested sequence number
+            if(receiver_ack.request_sequence_number > my_request_sequence_number)
+                my_request_sequence_number = request_sequence_number;
+            
+            
         }   else if(receiver_ack.request_sequence_number  == Sequence_number)
         //Acking for the transmitting packet, meaning this packet is lost
         {
@@ -256,30 +262,34 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
                 {
                     cwnd += BUFFER_SIZE;
                     dupACKcount = 0;
-                    Sequence_number += BUFFER_SIZE;
-                    //send the first packet due to move of window
-                    if(file_to_send[(Sequence_number - BUFFER_SIZE + cwnd - BUFFER_SIZE)/BUFFER_SIZE][0] != NULL)
+                    //send the  packets due to move of window
+                    for(j = 0; j < (my_request_sequence_number - Sequence_number)/BUFFER_SIZE; j++)
                     {
-                        for(i = 0; i < BUFFER_SIZE; i++)
+                        if(file_to_send[(Sequence_number  + cwnd - BUFFER_SIZE + j*BUFFER_SIZE)/BUFFER_SIZE][0] != NULL)
                         {
-                            msg.message[i] = file_to_send[(Sequence_number - BUFFER_SIZE + cwnd - BUFFER_SIZE)/BUFFER_SIZE][i];
-                      
+                            for(i = 0; i < BUFFER_SIZE; i++)
+                            {
+                                msg.message[i] = file_to_send[(Sequence_number  + cwnd - BUFFER_SIZE + j*BUFFER_SIZE)/BUFFER_SIZE][i];
+                                
+                            }
+                            msg.Sequence_number = Sequence_number  + cwnd - BUFFER_SIZE + j*BUFFER_SIZE;
+                            send_package(hostname, hostUDPport, msg);
                         }
-                        msg.Sequence_number = Sequence_number - BUFFER_SIZE + cwnd - BUFFER_SIZE;
-                        send_package(hostname, hostUDPport, msg);
                     }
+                    
+                    Sequence_number = my_request_sequence_number;
+                    
                     //send second packet due to increase of window
-                    if(file_to_send[(Sequence_number - BUFFER_SIZE + cwnd)/BUFFER_SIZE][0] != NULL)
+                    if(file_to_send[(Sequence_number + cwnd - BUFFER_SIZE )/BUFFER_SIZE][0] != NULL)
                     {
                         for(i = 0; i < BUFFER_SIZE; i++)
                         {
-                            msg.message[i] = file_to_send[(Sequence_number - BUFFER_SIZE + cwnd)/BUFFER_SIZE][i];
+                            msg.message[i] = file_to_send[(Sequence_number + cwnd - BUFFER_SIZE )/BUFFER_SIZE][i];
                             
                         }
-                        msg.Sequence_number = Sequence_number - BUFFER_SIZE + cwnd;
+                        msg.Sequence_number = Sequence_number + cwnd - BUFFER_SIZE;
                         send_package(hostname, hostUDPport, msg);
                     }
-//                    recv_ack = false;
                     break;
                 }
                 //timeout
@@ -342,19 +352,35 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
                     {
                         cwnd = cwnd + BUFFER_SIZE*(BUFFER_SIZE/cwnd);
                         dupACKcount = 0;
-                        //increament sequence_size
-                        Sequence_number += BUFFER_SIZE;
-                        //send MSS/cwnd + 1 packets, 1 due to new ack, MSS/cwd due to increase window size
-                        for( i = 0; i < BUFFER_SIZE/cwnd + 1; i++)
+                        
+                        //send the  packets due to move of window
+                        for(j = 0; j < (my_request_sequence_number - Sequence_number)/BUFFER_SIZE; j++)
                         {
-                            if(file_to_send[(Sequence_number - BUFFER_SIZE + cwnd - BUFFER_SIZE*(BUFFER_SIZE/cwnd) + i*BUFFER_SIZE)/BUFFER_SIZE][0] != NULL)
+                            if(file_to_send[(Sequence_number  + cwnd - BUFFER_SIZE + j*BUFFER_SIZE)/BUFFER_SIZE][0] != NULL)
+                            {
+                                for(i = 0; i < BUFFER_SIZE; i++)
+                                {
+                                    msg.message[i] = file_to_send[(Sequence_number  + cwnd - BUFFER_SIZE + j*BUFFER_SIZE)/BUFFER_SIZE][i];
+                                    
+                                }
+                                msg.Sequence_number = Sequence_number  + cwnd - BUFFER_SIZE + j*BUFFER_SIZE;
+                                send_package(hostname, hostUDPport, msg);
+                            }
+                        }
+                        
+                        Sequence_number = my_request_sequence_number;
+                        
+                        //send MSS/cwnd packets due to increase window size
+                        for( i = 0; i < BUFFER_SIZE/cwnd ; i++)
+                        {
+                            if(file_to_send[(Sequence_number + cwnd - BUFFER_SIZE*(BUFFER_SIZE/cwnd) + i*BUFFER_SIZE)/BUFFER_SIZE][0] != NULL)
                             {
                                 for(j = 0; j < BUFFER_SIZE; j++)
                                 {
-                                    msg.message[j] = file_to_send[(Sequence_number - BUFFER_SIZE + cwnd - BUFFER_SIZE*(BUFFER_SIZE/cwnd) + i*BUFFER_SIZE)/BUFFER_SIZE][j];
+                                    msg.message[j] = file_to_send[(Sequence_number + cwnd - BUFFER_SIZE*(BUFFER_SIZE/cwnd) + i*BUFFER_SIZE)/BUFFER_SIZE][j];
                                 
                                 }
-                                msg.Sequence_number = Sequence_number - BUFFER_SIZE + cwnd - BUFFER_SIZE*(BUFFER_SIZE/cwnd) + i*BUFFER_SIZE;
+                                msg.Sequence_number = Sequence_number + cwnd - BUFFER_SIZE*(BUFFER_SIZE/cwnd) + i*BUFFER_SIZE;
                                 send_package(hostname, hostUDPport, msg);
                             }
                         }
@@ -422,20 +448,41 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
                     //receive correct ack, move to stage 2
                 {
                     stage = 2;
-                    Sequence_number += BUFFER_SIZE;
-                    //send the packet due to move of window
-                    if(file_to_send[(Sequence_number - BUFFER_SIZE + cwnd)/BUFFER_SIZE][0] != NULL)
-                    {
-                        for(i = 0; i < BUFFER_SIZE; i++)
-                        {
-                            msg.message[i] = file_to_send[(Sequence_number - BUFFER_SIZE + cwnd )/BUFFER_SIZE][i];
-                            
-                        }
-                        msg.Sequence_number = Sequence_number - BUFFER_SIZE + cwnd;
-                        send_package(hostname, hostUDPport, msg);
-                    }
+                    int diff = ssthresh - cwnd;
                     cwnd = ssthresh;
                     dupACKcount = 0;
+                    //send the  packets due to move of window
+                    for(j = 0; j < (my_request_sequence_number - Sequence_number)/BUFFER_SIZE; j++)
+                    {
+                        if(file_to_send[(Sequence_number  + cwnd - BUFFER_SIZE + j*BUFFER_SIZE)/BUFFER_SIZE][0] != NULL)
+                        {
+                            for(i = 0; i < BUFFER_SIZE; i++)
+                            {
+                                msg.message[i] = file_to_send[(Sequence_number  + cwnd - BUFFER_SIZE + j*BUFFER_SIZE)/BUFFER_SIZE][i];
+                                
+                            }
+                            msg.Sequence_number = Sequence_number  + cwnd - BUFFER_SIZE + j*BUFFER_SIZE;
+                            send_package(hostname, hostUDPport, msg);
+                        }
+                    }
+                    
+                    Sequence_number = my_request_sequence_number;
+                    
+                    //send second packet due to increase of window
+                    for( i = 0; i < diff/BUFFER_SIZE ; i++)
+                    {
+                        if(file_to_send[(Sequence_number + cwnd - diff + i*BUFFER_SIZE)/BUFFER_SIZE][0] != NULL)
+                        {
+                            for(j = 0; j < BUFFER_SIZE; j++)
+                            {
+                                msg.message[j] = file_to_send[(Sequence_number + cwnd - diff + i*BUFFER_SIZE)/BUFFER_SIZE][j];
+                                
+                            }
+                            msg.Sequence_number = Sequence_number + cwnd - diff + i*BUFFER_SIZE;
+                            send_package(hostname, hostUDPport, msg);
+                        }
+                    }
+                    
                     break;
                 }   else if((clock()-start3) >= 1)
                     //timeout move to stage 1
@@ -500,6 +547,7 @@ void init_variable()
     recv_dup_ack = false;
     ISN = 0;
     Sequence_number = ISN;
+    my_request_sequence_number  = 0;
     int i, j;
     for(i =0; i < MAX_BUFFER; i++)
     {
