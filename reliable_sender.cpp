@@ -19,7 +19,7 @@
 #include <queue>
 #include <list>
 
-#define MAX_BUFFER		2000
+#define MAX_BUFFER		5000
 #define BUFFER_SIZE		1400
 
 char file_to_send[MAX_BUFFER][BUFFER_SIZE];
@@ -31,12 +31,24 @@ int recv_rv;
 struct sockaddr_storage recv_their_addr;	socklen_t recv_addr_len;
 char recv_s[INET6_ADDRSTRLEN];
 char myport[100];
-
+//sliding window size
+int cwnd;
+//slow start threshold
+int ssthresh;
+//count duplicate ack
+int dupACKcount;
+//ISN initial sequence number
+int ISN;
+//real ack
+bool recv_ack[MAX_BUFFER];
+//duplicated ack
+bool recv_dup_ack;
+//used to buffer send packets
+message buffer[MAX_BUFFER];
 
 typedef struct message_struct{
 	char messages[BUFFER_SIZE];
 	int Sequence_number;
-	int final;
 } message;
 
 typedef struct ack_struct{
@@ -187,6 +199,17 @@ void* accept_ack(void *identifier){
 	while(1){
 		ack receiver_ack;
 		recv_ack(&receiver_ack);
+        //when acking for next packet, meaning this packet has been successfully transmitted
+        if(receiver_ack.request_sequence_number > Sequence_number  )
+        {
+            //mark this packet to be delivered
+            recv_ack[Sequence_number] = true;
+        }   else if(receiver_ack.request_sequence_number  == Sequence_number)
+        //Acking for the transmitting packet, meaning this packet is lost
+        {
+            recv_dup_ack = true;
+            dupACKcount ++;
+        }
 	}
 	return NULL;
 }
@@ -199,14 +222,244 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
 	//read the file into buffer array
 	read_file(filename, bytesToTransfer);
 	
-	//initialize Sequence_number and total_sequence
-	Sequence_number = 0;
-	total_sequence = bytesToTransfer/BUFFER_SIZE+1;
 	
 	//create thread for accept ack
 	pthread_t t;
 	pthread_create(&t, NULL, &accept_ack, NULL);				
 	
+    message msg;
+    //send the first packet as initialization
+    send_first_packet();
+    
+    //stage 1 means in the slow start mode, 2 means in congestion avoidance mode and 3 means in fast recovery mode
+    int stage = 1;
+    
+    
+    while(file_to_send[Sequence_number/BUFFER_SIZE][0] != NULL)
+    {
+        //in slow start mode
+        if(stage == 1)
+        {
+            time_t start;
+            start=clock();//predefined  function in c
+            
+            //set the timeout value to be 1 SECOND  maybe change to 1ms later?????????????
+            while(true)
+            {
+                if(recv_dup_ack)
+                {
+                    //just a useless case
+                    recv_dup_ack = false;
+                    break;
+                }
+                else if(recv_ack[Sequence_number])
+                {
+                    cwnd += BUFFER_SIZE;
+                    dupACKcount = 0;
+                    Sequence_number += BUFFER_SIZE;
+                    //send the first packet due to move of window
+                    if(file_to_send[(Sequence_number - BUFFER_SIZE + cwnd - BUFFER_SIZE)/BUFFER_SIZE][0] != NULL)
+                    {
+                        for(i = 0; i < BUFFER_SIZE; i++)
+                        {
+                            msg.message[i] = file_to_send[(Sequence_number - BUFFER_SIZE + cwnd - BUFFER_SIZE)/BUFFER_SIZE][i];
+                      
+                        }
+                        msg.Sequence_number = Sequence_number - BUFFER_SIZE + cwnd - BUFFER_SIZE;
+                        send_package(hostname, hostUDPport, msg);
+                    }
+                    //send second packet due to increase of window
+                    if(file_to_send[(Sequence_number - BUFFER_SIZE + cwnd)/BUFFER_SIZE][0] != NULL)
+                    {
+                        for(i = 0; i < BUFFER_SIZE; i++)
+                        {
+                            msg.message[i] = file_to_send[(Sequence_number - BUFFER_SIZE + cwnd)/BUFFER_SIZE][i];
+                            
+                        }
+                        msg.Sequence_number = Sequence_number - BUFFER_SIZE + cwnd;
+                        send_package(hostname, hostUDPport, msg);
+                    }
+//                    recv_ack = false;
+                    break;
+                }
+                //timeout
+                else if((clock()-start) >= 1)
+                {
+                    ssthresh = cwnd / 2;
+                    cwnd  = BUFFER_SIZE;
+                    dupACKcount = 0;
+                    //retransmit the missing packet
+                    msg.Sequence_number = Sequence_number;
+                    for(i = 0; i < BUFFER_SIZE; i++)
+                    {
+                        msg.message[i] = file_to_send[(Sequence_number/BUFFER_SIZE][i];
+                    }
+                    send_package(hostname, hostUDPport, msg);
+                    break;
+                } else if(cwnd >= ssthresh)
+                //move to stage 2
+                {
+                    stage  = 2;
+                    break;
+                } else if(dupACKcount >= 3)
+                {
+                //move to stage 3
+                    stage = 3;
+                    ssthresh = cwnd/2;
+                    cwnd = ssthresh + 3 * BUFFER_SIZE;
+                    
+                    //retransmit the missing packet
+                    msg.Sequence_number = Sequence_number;
+                    for(i = 0; i < BUFFER_SIZE; i++)
+                    {
+                        msg.message[i] = file_to_send[(Sequence_number/BUFFER_SIZE][i];
+                    }
+                    send_package(hostname, hostUDPport, msg);
+                    break;
+                    
+                }
+            }
+            
+        }
+        
+        //in congestion avoidance mode
+        if(stage == 2)
+        {
+                time_t start2;
+                start2=clock();//predefined  function in c
+
+                while(true)
+                {
+                    //receving duplicate ack
+                    if(recv_dup_ack)
+                    {
+                        //useless statement
+                        recv_dup_ack = false;
+                        break;
+                        
+                    }   else if(recv_ack[Sequence_number])
+                    //receive the correct ack
+                    {
+                        cwnd = cwnd + BUFFER_SIZE*(BUFFER_SIZE/cwnd);
+                        dupACKcount = 0;
+                        //increament sequence_size
+                        Sequence_number += BUFFER_SIZE;
+                        //send MSS/cwnd + 1 packets, 1 due to new ack, MSS/cwd due to increase window size
+                        for( i = 0; i < BUFFER_SIZE/cwnd + 1; i++)
+                        {
+                            if(file_to_send[(Sequence_number - BUFFER_SIZE + cwnd - BUFFER_SIZE*(BUFFER_SIZE/cwnd) + i*BUFFER_SIZE)/BUFFER_SIZE][0] != NULL)
+                            {
+                                for(j = 0; j < BUFFER_SIZE; j++)
+                                {
+                                    msg.message[j] = file_to_send[(Sequence_number - BUFFER_SIZE + cwnd - BUFFER_SIZE*(BUFFER_SIZE/cwnd) + i*BUFFER_SIZE)/BUFFER_SIZE][j];
+                                
+                                }
+                                msg.Sequence_number = Sequence_number - BUFFER_SIZE + cwnd - BUFFER_SIZE*(BUFFER_SIZE/cwnd) + i*BUFFER_SIZE;
+                                send_package(hostname, hostUDPport, msg);
+                            }
+                        }
+                        break;
+                    }
+                    else if(dupACKcount >= 3)
+                    {
+                        //move to stage 3
+                        stage = 3;
+                        ssthresh = cwnd/2;
+                        cwnd = ssthresh + 3 * BUFFER_SIZE;
+                        
+                        //retransmit the missing packet
+                        msg.Sequence_number = Sequence_number;
+                        for(i = 0; i < BUFFER_SIZE; i++)
+                        {
+                            msg.message[i] = file_to_send[(Sequence_number/BUFFER_SIZE][i];
+                        }
+                        send_package(hostname, hostUDPport, msg);
+                        break;
+
+                    }   else if((clock()-start2) >= 1)
+                    // timeout, move to stage 1
+                    {
+                        stage = 1;
+                        ssthresh = cwnd/2;
+                        cwnd = BUFFER_SIZE;
+                        dupACKcount = 0;
+                        //retransmit the missing packet
+                        msg.Sequence_number = Sequence_number;
+                        for(i = 0; i < BUFFER_SIZE; i++)
+                        {
+                            msg.message[i] = file_to_send[(Sequence_number/BUFFER_SIZE][i];
+                        }
+                        send_package(hostname, hostUDPport, msg);
+                        break;
+                    
+                    }
+                }
+            
+        }
+        
+        //in fast recovery mode
+        if(stage == 3)
+        {
+            time_t start3;
+            start3=clock();//predefined  function in c
+            while (true) {
+                if(recv_dup_ack)
+                {
+                    //receive duplicate ack
+                    recv_dup_ack = false;
+                    cwnd += BUFFER_SIZE;
+                    //transimit new packet due to increase of window
+                    for(i = 0; i < BUFFER_SIZE; i++)
+                    {
+                        msg.message[i] = file_to_send[(Sequence_number + cwnd - BUFFER_SIZE)/BUFFER_SIZE][i];
+                        
+                    }
+                    msg.Sequence_number = Sequence_number + cwnd - BUFFER_SIZE;
+                    send_package(hostname, hostUDPport, msg);
+                    break;
+                    
+                } else if(recv_ack[Sequence_number])
+                    //receive correct ack, move to stage 2
+                {
+                    stage = 2;
+                    Sequence_number += BUFFER_SIZE;
+                    //send the packet due to move of window
+                    if(file_to_send[(Sequence_number - BUFFER_SIZE + cwnd)/BUFFER_SIZE][0] != NULL)
+                    {
+                        for(i = 0; i < BUFFER_SIZE; i++)
+                        {
+                            msg.message[i] = file_to_send[(Sequence_number - BUFFER_SIZE + cwnd )/BUFFER_SIZE][i];
+                            
+                        }
+                        msg.Sequence_number = Sequence_number - BUFFER_SIZE + cwnd;
+                        send_package(hostname, hostUDPport, msg);
+                    }
+                    cwnd = ssthresh;
+                    dupACKcount = 0;
+                    break;
+                }   else if((clock()-start3) >= 1)
+                    //timeout move to stage 1
+                {
+                    stage = 1;
+                    ssthresh = cwnd/2;
+                    cwnd = 1;
+                    dupACKcount = 0;
+                    //retransmit the missing packet
+                    msg.Sequence_number = Sequence_number;
+                    for(i = 0; i < BUFFER_SIZE; i++)
+                    {
+                        msg.message[i] = file_to_send[(Sequence_number/BUFFER_SIZE][i];
+                    }
+                    send_package(hostname, hostUDPport, msg);
+                    break;
+                }
+            }
+            
+        }
+    }
+    
+    
+    /*
 	//sending first package
 	for(j = 0; j < total_sequence; j++){
 		message msg;
@@ -222,7 +475,40 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
 		send_package(hostname, hostUDPport, msg);
 		Sequence_number++;
 	}
+     */
 
+}
+
+void send_first_packet()
+{
+    message first_msg;
+    first_msg.Sequence_number = Sequence_number;
+    for(j = 0; j < BUFFER_SIZE; j++)
+    {
+        msg.message[j] = file_to_send[0][j];
+    }
+    send_package(hostname, hostUDPport, msg);
+}
+
+void init_variable()
+{
+    cwnd = BUFFER_SIZE;
+    //init the ssthresh to be 64KB
+    ssthresh = 64*1024;
+    dupACKcount = 0;
+//    recv_ack = false;
+    recv_dup_ack = false;
+    ISN = 0;
+    Sequence_number = ISN;
+    int i, j;
+    for(i =0; i < MAX_BUFFER; i++)
+    {
+        for(j = 0; j < BUFFER_SIZE; j++)
+        {
+            file_to_send[i][j] = NULL;
+        }
+        recv_ack[i] = false;
+    }
 }
 
 int main(int argc, char** argv)
@@ -235,12 +521,14 @@ int main(int argc, char** argv)
 		fprintf(stderr, "usage: %s receiver_hostname receiver_port filename_to_xfer bytes_to_xfer\n\n", argv[0]);
 		exit(1);
 	}
-	
+    
+    init_variable();
 	udpPort = (unsigned short int)atoi(argv[2]);
 	numBytes = atoll(argv[4]);
 	bind_udp(udpPort-1);
 	reliablyTransfer(argv[1], udpPort, argv[3], numBytes);
 } 
+
 
 
 
