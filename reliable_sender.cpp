@@ -32,6 +32,16 @@ int recv_rv;
 struct sockaddr_storage recv_their_addr;	socklen_t recv_addr_len;
 char recv_s[INET6_ADDRSTRLEN];
 char myport[100];
+
+typedef struct message_struct{
+	char messages[BUFFER_SIZE];
+	int Sequence_number;
+} message;
+
+typedef struct ack_struct{
+	int request_sequence_number;
+} ack;
+
 //sliding window size
 int cwnd;
 //slow start threshold
@@ -47,14 +57,6 @@ bool recv_dup_ack;
 //used to buffer send packets
 message buffer[MAX_BUFFER];
 
-typedef struct message_struct{
-	char messages[BUFFER_SIZE];
-	int Sequence_number;
-} message;
-
-typedef struct ack_struct{
-	int request_sequence_number;
-} ack;
 
 
 
@@ -145,6 +147,7 @@ int read_file(char* filename, unsigned long long int bytesToTransfer){
 		file_to_send[j][i] = buffer[k];
 		k++;
 	}
+	file_to_send[j][bytesToTransfer] = EOF;
 	
 	free (buffer);
 	return 0;
@@ -192,14 +195,26 @@ int bind_udp(unsigned short int port){
 
 }
 
-int recv_ack(ack* recv_ack){
+int recv_acks(ack* recv_ack){
 	return recvfrom(recv_sockfd, recv_ack, sizeof(*recv_ack), 0, (struct sockaddr *)&recv_their_addr, &recv_addr_len);
+}
+
+void send_first_packet(char* hostname, unsigned short int hostUDPport)
+{
+    message first_msg;
+    first_msg.Sequence_number = Sequence_number;
+    int j;
+    for(j = 0; j < BUFFER_SIZE; j++)
+    {
+        first_msg.messages[j] = file_to_send[0][j];
+    }
+    send_package(hostname, hostUDPport, first_msg);
 }
 
 void* accept_ack(void *identifier){
 	while(1){
 		ack receiver_ack;
-		recv_ack(&receiver_ack);
+		recv_acks(&receiver_ack);
         //when acking for next packet, meaning this packet has been successfully transmitted
         if(receiver_ack.request_sequence_number > Sequence_number  )
         {
@@ -207,7 +222,7 @@ void* accept_ack(void *identifier){
             recv_ack[Sequence_number] = true;
             //update my local requested sequence number
             if(receiver_ack.request_sequence_number > my_request_sequence_number)
-                my_request_sequence_number = request_sequence_number;
+                my_request_sequence_number = receiver_ack.request_sequence_number;
             
             
         }   else if(receiver_ack.request_sequence_number  == Sequence_number)
@@ -223,7 +238,7 @@ void* accept_ack(void *identifier){
 void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* filename, unsigned long long int bytesToTransfer)
 {
 	sleep(20);
-	int total_sequence;
+//	int total_sequence;
 	int i, j;
 	//read the file into buffer array
 	read_file(filename, bytesToTransfer);
@@ -235,13 +250,13 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
 	
     message msg;
     //send the first packet as initialization
-    send_first_packet();
+    send_first_packet(hostname, hostUDPport);
     
     //stage 1 means in the slow start mode, 2 means in congestion avoidance mode and 3 means in fast recovery mode
     int stage = 1;
     
     
-    while(file_to_send[Sequence_number/BUFFER_SIZE][0] != NULL)
+    while(file_to_send[Sequence_number/BUFFER_SIZE][0] != '\0')
     {
         //in slow start mode
         if(stage == 1)
@@ -265,11 +280,11 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
                     //send the  packets due to move of window
                     for(j = 0; j < (my_request_sequence_number - Sequence_number)/BUFFER_SIZE; j++)
                     {
-                        if(file_to_send[(Sequence_number  + cwnd - BUFFER_SIZE + j*BUFFER_SIZE)/BUFFER_SIZE][0] != NULL)
+                        if(file_to_send[(Sequence_number  + cwnd - BUFFER_SIZE + j*BUFFER_SIZE)/BUFFER_SIZE][0] != '\0')
                         {
                             for(i = 0; i < BUFFER_SIZE; i++)
                             {
-                                msg.message[i] = file_to_send[(Sequence_number  + cwnd - BUFFER_SIZE + j*BUFFER_SIZE)/BUFFER_SIZE][i];
+                                msg.messages[i] = file_to_send[(Sequence_number  + cwnd - BUFFER_SIZE + j*BUFFER_SIZE)/BUFFER_SIZE][i];
                                 
                             }
                             msg.Sequence_number = Sequence_number  + cwnd - BUFFER_SIZE + j*BUFFER_SIZE;
@@ -280,11 +295,11 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
                     Sequence_number = my_request_sequence_number;
                     
                     //send second packet due to increase of window
-                    if(file_to_send[(Sequence_number + cwnd - BUFFER_SIZE )/BUFFER_SIZE][0] != NULL)
+                    if(file_to_send[(Sequence_number + cwnd - BUFFER_SIZE )/BUFFER_SIZE][0] != '\0')
                     {
                         for(i = 0; i < BUFFER_SIZE; i++)
                         {
-                            msg.message[i] = file_to_send[(Sequence_number + cwnd - BUFFER_SIZE )/BUFFER_SIZE][i];
+                            msg.messages[i] = file_to_send[(Sequence_number + cwnd - BUFFER_SIZE )/BUFFER_SIZE][i];
                             
                         }
                         msg.Sequence_number = Sequence_number + cwnd - BUFFER_SIZE;
@@ -302,7 +317,7 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
                     msg.Sequence_number = Sequence_number;
                     for(i = 0; i < BUFFER_SIZE; i++)
                     {
-                        msg.message[i] = file_to_send[(Sequence_number/BUFFER_SIZE][i];
+                        msg.messages[i] = file_to_send[(Sequence_number/BUFFER_SIZE)][i];
                     }
                     send_package(hostname, hostUDPport, msg);
                     break;
@@ -322,7 +337,7 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
                     msg.Sequence_number = Sequence_number;
                     for(i = 0; i < BUFFER_SIZE; i++)
                     {
-                        msg.message[i] = file_to_send[(Sequence_number/BUFFER_SIZE][i];
+                        msg.messages[i] = file_to_send[(Sequence_number/BUFFER_SIZE)][i];
                     }
                     send_package(hostname, hostUDPport, msg);
                     break;
@@ -356,11 +371,11 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
                         //send the  packets due to move of window
                         for(j = 0; j < (my_request_sequence_number - Sequence_number)/BUFFER_SIZE; j++)
                         {
-                            if(file_to_send[(Sequence_number  + cwnd - BUFFER_SIZE + j*BUFFER_SIZE)/BUFFER_SIZE][0] != NULL)
+                            if(file_to_send[(Sequence_number  + cwnd - BUFFER_SIZE + j*BUFFER_SIZE)/BUFFER_SIZE][0] != '\0')
                             {
                                 for(i = 0; i < BUFFER_SIZE; i++)
                                 {
-                                    msg.message[i] = file_to_send[(Sequence_number  + cwnd - BUFFER_SIZE + j*BUFFER_SIZE)/BUFFER_SIZE][i];
+                                    msg.messages[i] = file_to_send[(Sequence_number  + cwnd - BUFFER_SIZE + j*BUFFER_SIZE)/BUFFER_SIZE][i];
                                     
                                 }
                                 msg.Sequence_number = Sequence_number  + cwnd - BUFFER_SIZE + j*BUFFER_SIZE;
@@ -373,11 +388,11 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
                         //send MSS/cwnd packets due to increase window size
                         for( i = 0; i < BUFFER_SIZE/cwnd ; i++)
                         {
-                            if(file_to_send[(Sequence_number + cwnd - BUFFER_SIZE*(BUFFER_SIZE/cwnd) + i*BUFFER_SIZE)/BUFFER_SIZE][0] != NULL)
+                            if(file_to_send[(Sequence_number + cwnd - BUFFER_SIZE*(BUFFER_SIZE/cwnd) + i*BUFFER_SIZE)/BUFFER_SIZE][0] != '\0')
                             {
                                 for(j = 0; j < BUFFER_SIZE; j++)
                                 {
-                                    msg.message[j] = file_to_send[(Sequence_number + cwnd - BUFFER_SIZE*(BUFFER_SIZE/cwnd) + i*BUFFER_SIZE)/BUFFER_SIZE][j];
+                                    msg.messages[j] = file_to_send[(Sequence_number + cwnd - BUFFER_SIZE*(BUFFER_SIZE/cwnd) + i*BUFFER_SIZE)/BUFFER_SIZE][j];
                                 
                                 }
                                 msg.Sequence_number = Sequence_number + cwnd - BUFFER_SIZE*(BUFFER_SIZE/cwnd) + i*BUFFER_SIZE;
@@ -397,7 +412,7 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
                         msg.Sequence_number = Sequence_number;
                         for(i = 0; i < BUFFER_SIZE; i++)
                         {
-                            msg.message[i] = file_to_send[(Sequence_number/BUFFER_SIZE][i];
+                            msg.messages[i] = file_to_send[(Sequence_number/BUFFER_SIZE)][i];
                         }
                         send_package(hostname, hostUDPport, msg);
                         break;
@@ -413,7 +428,7 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
                         msg.Sequence_number = Sequence_number;
                         for(i = 0; i < BUFFER_SIZE; i++)
                         {
-                            msg.message[i] = file_to_send[(Sequence_number/BUFFER_SIZE][i];
+                            msg.messages[i] = file_to_send[(Sequence_number/BUFFER_SIZE)][i];
                         }
                         send_package(hostname, hostUDPport, msg);
                         break;
@@ -437,7 +452,7 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
                     //transimit new packet due to increase of window
                     for(i = 0; i < BUFFER_SIZE; i++)
                     {
-                        msg.message[i] = file_to_send[(Sequence_number + cwnd - BUFFER_SIZE)/BUFFER_SIZE][i];
+                        msg.messages[i] = file_to_send[(Sequence_number + cwnd - BUFFER_SIZE)/BUFFER_SIZE][i];
                         
                     }
                     msg.Sequence_number = Sequence_number + cwnd - BUFFER_SIZE;
@@ -454,11 +469,11 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
                     //send the  packets due to move of window
                     for(j = 0; j < (my_request_sequence_number - Sequence_number)/BUFFER_SIZE; j++)
                     {
-                        if(file_to_send[(Sequence_number  + cwnd - BUFFER_SIZE + j*BUFFER_SIZE)/BUFFER_SIZE][0] != NULL)
+                        if(file_to_send[(Sequence_number  + cwnd - BUFFER_SIZE + j*BUFFER_SIZE)/BUFFER_SIZE][0] != '\0')
                         {
                             for(i = 0; i < BUFFER_SIZE; i++)
                             {
-                                msg.message[i] = file_to_send[(Sequence_number  + cwnd - BUFFER_SIZE + j*BUFFER_SIZE)/BUFFER_SIZE][i];
+                                msg.messages[i] = file_to_send[(Sequence_number  + cwnd - BUFFER_SIZE + j*BUFFER_SIZE)/BUFFER_SIZE][i];
                                 
                             }
                             msg.Sequence_number = Sequence_number  + cwnd - BUFFER_SIZE + j*BUFFER_SIZE;
@@ -471,11 +486,11 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
                     //send second packet due to increase of window
                     for( i = 0; i < diff/BUFFER_SIZE ; i++)
                     {
-                        if(file_to_send[(Sequence_number + cwnd - diff + i*BUFFER_SIZE)/BUFFER_SIZE][0] != NULL)
+                        if(file_to_send[(Sequence_number + cwnd - diff + i*BUFFER_SIZE)/BUFFER_SIZE][0] != '\0')
                         {
                             for(j = 0; j < BUFFER_SIZE; j++)
                             {
-                                msg.message[j] = file_to_send[(Sequence_number + cwnd - diff + i*BUFFER_SIZE)/BUFFER_SIZE][j];
+                                msg.messages[j] = file_to_send[(Sequence_number + cwnd - diff + i*BUFFER_SIZE)/BUFFER_SIZE][j];
                                 
                             }
                             msg.Sequence_number = Sequence_number + cwnd - diff + i*BUFFER_SIZE;
@@ -495,7 +510,7 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
                     msg.Sequence_number = Sequence_number;
                     for(i = 0; i < BUFFER_SIZE; i++)
                     {
-                        msg.message[i] = file_to_send[(Sequence_number/BUFFER_SIZE][i];
+                        msg.messages[i] = file_to_send[(Sequence_number/BUFFER_SIZE)][i];
                     }
                     send_package(hostname, hostUDPport, msg);
                     break;
@@ -526,16 +541,7 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
 
 }
 
-void send_first_packet()
-{
-    message first_msg;
-    first_msg.Sequence_number = Sequence_number;
-    for(j = 0; j < BUFFER_SIZE; j++)
-    {
-        msg.message[j] = file_to_send[0][j];
-    }
-    send_package(hostname, hostUDPport, msg);
-}
+
 
 void init_variable()
 {
@@ -553,7 +559,7 @@ void init_variable()
     {
         for(j = 0; j < BUFFER_SIZE; j++)
         {
-            file_to_send[i][j] = NULL;
+            //file_to_send[i][j] = '\0';
         }
         recv_ack[i] = false;
     }
